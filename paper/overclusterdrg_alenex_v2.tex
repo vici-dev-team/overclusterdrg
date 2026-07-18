@@ -1,0 +1,788 @@
+%% ===================================================================
+%% OverclusterDRG --- ALENEX submission (revised)
+%% Compile: pdflatex -> bibtex -> pdflatex -> pdflatex
+%% Requires siam.cls in the same directory.
+%% ===================================================================
+\documentclass{siam}
+
+\usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{
+  {./}
+  {./results/}
+  {./results/multidata/}
+  {./OverclusterDRG_Paper/}
+  {./OverclusteringRKC/}
+  {./overclustering_me/}
+}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{definition}{Definition}
+\newenvironment{conjecture}[1][]{\par\medskip\noindent
+  \textbf{Conjecture (#1).}\itshape\ }{\par\medskip}
+\makeatletter
+\@ifundefined{proof}{%
+  \newenvironment{proof}[1][Proof]{\noindent\textit{#1.}\ }%
+    {\hfill$\square$\par\medskip}%
+}{}
+\makeatother
+\newcommand{\remark}[1]{\par\medskip\noindent\textit{Remark.} #1\par\medskip}
+
+\newcommand{\OPT}{\mathrm{OPT}}
+\newcommand{\rz}{r_z}
+\newcommand{\CL}{C_L}
+\newcommand{\Copt}{C^{*}_{Q}}
+
+\title{OverclusterDRG: A Deterministic, LP-Free Algorithm for
+Robust $k$-Center with Outliers\thanks{Department of Computer
+Science, University of Delhi. Supervised by Prof.\ Neelima Gupta.}}
+
+\author{Rudra Bhardwaj}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The Robust $k$-Center problem asks for $k$ centers covering all but
+$z$ outliers at minimum radius. Existing methods sit at two extremes:
+the Charikar et al.\ greedy delivers quality at quadratic cost, while
+the RKC-Gonzalez heuristic is fast but has no guarantee; the
+randomised method of Ding et al.\ lies between them, but its trial
+count grows linearly in $z$. We present OverclusterDRG, a
+deterministic, LP-free, single-pass algorithm. The key idea is to run
+Gonzalez for $k+O$ steps instead of $k$, building an overcomplete
+pool, then select $k$ centers by greedy initialisation and $1$-swap
+local search. On 36 configurations of UCI Adult ($N$ up to $20{,}000$),
+OC-Local achieves a mean LP ratio of $1.147$, beating Charikar in
+$33/36$ configurations (median $7\times$ faster) and Ding in $35/36$
+(median $8\times$ faster). Every comparison is significant at
+$p<10^{-5}$. The central theoretical result is an exact phase
+transition: the pool provably contains a $3\cdot\OPT$ solution
+whenever $O\ge z$, and contains no finite guarantee when $O<z$, so
+$O=z$ is the smallest valid overcount. One extra Gonzalez step
+additionally gives a free certified lower bound $\OPT\ge D_{k+z+1}/2$
+at every run. The quality advantage is consistent across datasets:
+$1.155$ on Diabetes Indicators and $1.171$ on Covertype against
+interpolated LP bounds.
+\end{abstract}
+
+%% ===================================================================
+\section{Introduction}
+%% ===================================================================
+
+A single distant point can dictate the entire $k$-center objective.
+Robust $k$-Center (RKC) repairs this: given $N$ points, $k$ centers,
+and an outlier budget $z$, find the smallest radius covering all but
+$z$ points. The problem is NP-hard, and the outlier budget interacts
+badly with farthest-point methods---the points to ignore are exactly
+the ones that attract the algorithm.
+
+Two baselines bracket the problem. Charikar et al.\ \cite{charikar2001}
+give a $3$-approximation, but on UCI Adult it ran $5{,}528\times$ slower
+than RKC-Gonzalez while improving the radius by only $8.32\%$. The
+Gonzalez adaptation is fast and competitive in practice but has no
+approximation guarantee---one outlier can hijack a center. Ding et
+al.\ \cite{ding2019} interpolate with a randomised strategy requiring
+$T=\lceil(z{+}1)\ln 100\rceil$ trials, so runtime grows with $z$ and
+the output is random.
+
+OverclusterDRG fills the gap: run Gonzalez for $k+O$ steps, building a
+pool of $k+O$ candidates, then select the best $k$-subset. Outliers
+still consume steps, but the $O$ extra steps let the pool absorb them
+and still hold a representative for each true cluster. The right slack
+is exactly $O=z$---this is a theorem, not a hyperparameter.
+
+\noindent\textbf{Contributions.}
+\begin{enumerate}
+  \item \textbf{Algorithm.} OverclusterDRG, deterministic, LP-free,
+  single-pass, running in $O(Nkz)$.
+  \item \textbf{Theory.} An exact phase transition at $O=z$: the pool
+  contains a $3\cdot\OPT$ solution for $O\ge z$, and the ratio is
+  unbounded for $O<z$ (Theorems~\ref{thm:sufficiency} and
+  \ref{thm:necessity}). One extra Gonzalez step gives a free certified
+  lower bound $\OPT\ge D_{k+z+1}/2$ at every $N$.
+  \item \textbf{Experiments.} Mean LP ratio $1.147$ on Adult (exact LP),
+  beating Charikar in $33/36$ and Ding in $35/36$ configurations;
+  $p<10^{-5}$ throughout. Results are consistent on Diabetes and
+  Covertype.
+\end{enumerate}
+
+%% ===================================================================
+\section{Problem Setup}
+%% ===================================================================
+\label{sec:setup}
+
+\begin{definition}[Robust $k$-Center]
+Given $(X,d)$ with $|X|=N$, integers $k\ge1$ and $z\ge0$, find
+$C\subseteq X$ with $|C|=k$ and $S\subseteq X$ with $|S|\le z$
+minimising
+\[
+  R(C,S) = \max_{x\in X\setminus S} d(x,C), \qquad
+  \OPT = \min_{|C|=k,\,|S|\le z} R(C,S).
+\]
+\end{definition}
+
+For a fixed $C$, the optimal $S$ is simply the $z$ farthest points,
+so we write $\rz(C,X)$ for the $(z{+}1)$-th largest distance from
+$X$ to $C$, and $\OPT=\min_{|C|=k}\rz(C,X)$.
+
+\paragraph{LP lower bound.}
+We binary-search candidate radii and solve a covering LP at each
+probe; the smallest feasible radius $R_{\mathrm{LP}}$ satisfies
+$R_{\mathrm{LP}}\le\OPT$. We report $\rz(C)/R_{\mathrm{LP}}$
+throughout. The full LP formulation is in Appendix~\ref{app:lp}.
+
+\paragraph{Two optima.}
+Let $\OPT_{m,0}=\min_{|C|=m}\max_{x\in X}d(x,C)$ denote the
+standard $m$-center optimum with no outliers. The relationship between
+$\OPT_{k+O,0}$ and $\OPT_{k,z}$ is the hinge of the theory.
+
+%% ===================================================================
+\section{Related Work}
+%% ===================================================================
+
+Gonzalez \cite{gonzalez1985} gave the $2$-approximation for $k$-center
+in $O(Nk)$; its RKC adaptation runs $\rz$ on the result but has no
+guarantee.
+
+Charikar et al.\ \cite{charikar2001} gave the first constant-factor
+guarantee for outlier clustering; the RKC variant certifies $3r^{*}$
+at quadratic cost. Ding et al.\ \cite{ding2019} achieve a good-quality
+randomised method, but the trial count $T=O(z\log(1/\delta))$ limits
+scalability.
+
+Local search gives the best known bounds for $k$-median: Arya et al.\
+\cite{arya2004} proved a $(3+2/p)$-approximation for $p$-swap, via
+telescoping sums over swaps. For $k$-center the objective is a maximum,
+not a sum, and the argument breaks entirely. Goyal and Jaiswal
+\cite{goyal2021} give tight FPT approximations for constrained
+$k$-center variants; these target a different regime.
+
+No prior algorithm is simultaneously deterministic, LP-free, fast at
+large $N$ and large $z$, and provably tied to $\OPT$.
+
+%% ===================================================================
+\section{The OverclusterDRG Algorithm}
+%% ===================================================================
+\label{sec:algorithm}
+
+The algorithm overclusters in Phase~1 and then selects in Phase~2.
+
+\paragraph{Phase 1: pool construction.}
+Run Gonzalez for $k+O$ steps. Start from the point nearest to the
+empirical centroid (making the run deterministic). At each step add
+the point farthest from the current pool. The result is a pool
+$Q=\{q_1,\dots,q_{k+O}\}$, built in $O(N(k{+}O))$ time. Default: $O=z$.
+
+\paragraph{Phase 2a: forward greedy (OC-Forward).}
+Pre-compute the $N\times(k{+}O)$ distance matrix. Greedily add pool
+points, each time choosing the one that minimises $\rz$ of the current
+set. Cost: $O(NkO)$.
+
+\paragraph{Phase 2b: $1$-swap local search (OC-Local).}
+Starting from the forward-greedy solution, scan all pairs
+$(c_i, q)\in C\times(Q\setminus C)$ and accept the first swap that
+strictly decreases $\rz$. Repeat until no swap improves. The number of
+distinct subsets is finite and the objective strictly decreases each
+step, so termination is guaranteed.
+
+\begin{algorithm}[t]
+\caption{OverclusterDRG$(X, k, z, O{=}z)$}
+\label{alg:main}
+\begin{algorithmic}[1]
+\State $Q \gets \textsc{Gonzalez}(X,\, k+O)$
+\State $C_0 \gets \textsc{ForwardGreedy}(X, Q, k, z)$
+\State $C \gets \textsc{LocalSearch}(X, Q, C_0, z)$
+\State \Return $C$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Complexity.}
+With $O=z$ the total work is $O(Nkz)$, dominated by Phase~2. Our
+measured exponent is $O(N^{1.85})$ ($R^2=0.976$). Memory is
+$O(Nz)$---about $7.9$\,GB at $N=99{,}000$, $k=20$, $z=10\%$, which can
+be block-processed if needed.
+
+%% ===================================================================
+\section{Theoretical Analysis}
+%% ===================================================================
+\label{sec:theory}
+
+The guarantee rests on two lemmas and two theorems.
+
+\subsection{Why $O = z$ is the right overcount}
+
+\begin{lemma}[Pool guarantee]
+\label{lem:pool}
+Let $Q=\textsc{Gonzalez}(X,k{+}O)$. There exists a $k$-subset
+$C_0\subseteq Q$ with
+$\rz(C_0,X)\le \OPT_{k,z} + 2\cdot\OPT_{k+O,0}$.
+\end{lemma}
+
+\begin{proof}
+Let $(C^{*},S^{*})$ be an optimal RKC solution. For each
+$c^{*}_j\in C^{*}$, pick the nearest pool point $q_j$; the Gonzalez
+$2$-approximation gives $d(c^{*}_j,q_j)\le 2\cdot\OPT_{k+O,0}$. Set
+$C_0=\{q_1,\dots,q_k\}$. For any inlier $x\notin S^{*}$ with nearest
+optimal center $c^{*}_j$:
+\[
+d(x,C_0)\le d(x,c^{*}_j)+d(c^{*}_j,q_j)\le\OPT+2\cdot\OPT_{k+O,0}.
+\]
+Discarding $S^{*}$ gives $\rz(C_0)\le\OPT+2\cdot\OPT_{k+O,0}$.
+\end{proof}
+
+The bound mixes two different optima. The next lemma closes the gap
+when $O\ge z$.
+
+\begin{lemma}[OPT comparison]
+\label{lem:optcompare}
+For $O\ge z$:\; $\OPT_{k+O,0}\le\OPT_{k,z}$.
+\end{lemma}
+
+\begin{proof}
+Take the $k$ optimal RKC centers and add one center at each of the
+$z$ outliers. This covers all $N$ points within radius $\OPT$, so
+$\OPT_{k+z,0}\le\OPT$. More centers can only help, so for $O\ge z$,
+$\OPT_{k+O,0}\le\OPT_{k+z,0}\le\OPT$.
+\end{proof}
+
+\begin{theorem}[Sufficiency]
+\label{thm:sufficiency}
+For $O\ge z$, the pool contains a $k$-subset with $\rz\le 3\cdot\OPT$.
+\end{theorem}
+
+\begin{proof}
+Lemma~\ref{lem:pool} gives $\rz(C_0)\le\OPT+2\cdot\OPT_{k+O,0}$.
+Lemma~\ref{lem:optcompare} gives $\OPT_{k+O,0}\le\OPT$.
+Substituting: $\rz(C_0)\le\OPT+2\cdot\OPT=3\cdot\OPT$.
+\end{proof}
+
+The converse shows $O=z$ is not just sufficient but the minimum.
+
+\begin{theorem}[Necessity]
+\label{thm:necessity}
+For any $k\ge 2$, $z\ge 1$, $M>0$, there is an instance with
+$\OPT_{k,z}=\varepsilon$ on which the pool with $O=z-1$ satisfies
+$\min_{C\subseteq Q,|C|=k}\rz(C)\ge M\varepsilon$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Place $k$ tight clusters of $m>z$ inliers each, and $z$ outliers at
+distance $R\gg\varepsilon$ in orthogonal directions. The optimum covers
+the $k$ clusters and discards the $z$ outliers at cost $\varepsilon$.
+Since the outliers are the farthest points, Gonzalez selects all $z$
+of them before any second cluster gets a representative. With $O=z-1$,
+the pool has the starting inlier (from one cluster), the $z$ outliers,
+and only $k-2$ further cluster representatives---leaving at least one
+cluster with no pool point. Every $k$-subset of the pool either wastes
+a slot on an outlier or leaves the orphaned cluster uncovered; since
+that cluster has $m>z$ inliers, none of the $z$ budget slots can
+discard them all. The resulting radius is at least $D-2\varepsilon\ge
+M\varepsilon$ by choosing $D=2(M{+}1)\varepsilon$.
+\end{proof}
+
+\begin{corollary}[Exact phase transition]
+\label{cor:phase}
+$O=z$ is the smallest overcount with a finite pool guarantee. Below
+$z$ the ratio is unbounded ($k\ge 2$); at and above $z$ the pool
+always contains a $3\cdot\OPT$ subset.
+\end{corollary}
+
+The intuition: Gonzalez wastes exactly one step per outlier. With
+$k+O$ total steps and $z$ wasted on outliers, the useful steps are
+$k+O-z$. At $O=z$ this is exactly $k$---one representative per true
+cluster. Below $z$, one cluster is left without a representative.
+
+\subsection{A free certified lower bound}
+
+\begin{lemma}[Certified lower bound]
+\label{lem:cert}
+If $N\ge k{+}z{+}1$, then $\OPT\ge D_{k+z+1}/2$, where $D_t$ is the
+selection distance of the $t$-th Gonzalez point.
+\end{lemma}
+
+\begin{proof}
+The $k+z+1$ Gonzalez points are pairwise at distance $\ge D_{k+z+1}$:
+each $q_t$ was selected at distance $D_t\ge D_{k+z+1}$ from all
+predecessors. The optimal solution discards at most $z$ of them, so
+at least $k+1$ are inliers. By pigeonhole two share an optimal center,
+giving $2\cdot\OPT\ge D_{k+z+1}$.
+\end{proof}
+
+Every run of OverclusterDRG automatically computes $D_{k+z+1}$ by
+running one step past the pool. This yields the per-instance certificate
+\[
+  \frac{\rz(C)}{\OPT} \;\le\; \frac{2\,\rz(C)}{D_{k+z+1}}
+\]
+with no LP. On real data the certified ratio averages $3.6$ (Adult),
+$3.1$ (Diabetes), $3.3$ (Covertype)---valid but conservative. The
+bound is loosest when $z$ is large relative to $N$: running
+$k+z+1\gg k$ Gonzalez steps drives $D_{k+z+1}$ well below $\OPT$.
+The LP is about $3\times$ tighter where available. We recommend the
+certificate as a quick sanity bound and the LP for ratio-accurate
+comparison.
+
+\subsection{Local search: what Phase~2 finds}
+
+Exhaustive search over all $k$-subsets of $Q$ retrieves the guaranteed
+$3\cdot\OPT$ subset (Theorem~\ref{thm:sufficiency}), but costs
+$O(N\binom{k+O}{k})$---astronomical at $O=z$. The practical
+$1$-swap local search is cheaper but is not exact:
+
+\begin{theorem}[$1$-swap can fail]
+\label{thm:neg}
+For any $D>0$, there is an instance where a greedy-initialised $1$-swap
+local optimum on $Q$ satisfies $\rz(\CL)/\OPT>D$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Take $k$ equal-sized clusters and two singletons at slightly greater
+distance. The optimum covers the clusters and discards the singletons.
+Because the singletons are the two farthest points, the Gonzalez pool
+places them first; forward greedy inserts both before enough cluster
+representatives, leaving two clusters orphaned. No single swap covers
+both at once, so the local optimum is stuck. The radius is the
+inter-cluster distance $D'$; by choosing $D'$ large, the ratio
+$D'/\varepsilon$ is unbounded.
+\end{proof}
+
+This failure needs adversarially equal inter-cluster distances, a
+structure real datasets rarely produce. On $400$ small random
+subsamples of Adult ($N\le 1{,}000$, $k\in\{5,10\}$), $1$-swap matched
+exhaustive search exactly in $97.2\%$ of instances; the maximum
+observed gap was $4.82\%$.
+
+We conjecture that under generic (pairwise-distinct) distances and with
+each optimal cluster large enough, $1$-swap satisfies
+$\rz(\CL)\le(1+2/k)\cdot f(O)$ where $f(O)$ is the pool optimal.
+This is supported by every one of the $400$ test instances but remains
+open.
+
+%% ===================================================================
+\section{Experiments}
+%% ===================================================================
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:expsetup}
+
+\begin{table}[t]
+\caption{Datasets. All features z-score standardised.}
+\label{tab:datasets}
+\centering
+\begin{tabular}{lrrl}
+\toprule
+Dataset & Rows used & Features & Source \\
+\midrule
+UCI Adult & 32{,}561 & 6 & \cite{adult_dataset} \\
+Diabetes Indicators & 99{,}492 & 8 & UCI \\
+Covertype & 30{,}000 of 581{,}012 & 10 & \cite{covertype_dataset} \\
+HTRU2 & 17{,}898 & 8 & \cite{htru2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:datasets} lists the datasets. The Adult grid uses
+$N\in\{500,1000,2000,5000,10000,20000\}$, $k\in\{10,20,50\}$, and
+outlier rate $z/N\in\{10\%,20\%\}$---36 configurations total. Diabetes
+substitutes $N=15{,}000$ for $N=2{,}000$ (36 configurations); Covertype
+uses $N\in\{500,1000,5000,10000,15000\}$ (30 configurations). Five
+algorithms are compared: RKC-Gonzalez, OC-Forward, OC-Local, Charikar
+et al.\ \cite{charikar2001} at its achieved radius, and Ding et al.\
+\cite{ding2019} at $T=\lceil(z{+}1)\ln 100\rceil$ trials.
+
+\paragraph{Preprocessing.}
+Adult uses its six numeric features (age, fnlwgt, education-num,
+capital-gain, capital-loss, hours-per-week) after z-scoring; categorical
+columns are dropped. Covertype is subsampled to $30{,}000$ rows using
+NumPy \texttt{default\_rng} with seed $42$, then z-scored. We use the
+same subsample for all Covertype configurations.
+
+\paragraph{LP bounds.}
+All LP bounds are exact (Gurobi~12.0.3, feasibility tolerance
+$10^{-6}$) on Adult---every configuration, at up to 94 hours for
+$N=20{,}000$. On Diabetes and Covertype, the LP is too expensive at
+large $N$, so we interpolate using the ratio learned from Adult
+configurations; this is disclosed in all tables that use interpolated
+values.
+
+\paragraph{Certified lower bounds.}
+As noted in Lemma~\ref{lem:cert}, every run produces a free lower
+bound $\OPT\ge D_{k+z+1}/2$. The certified ratio for OC-Local averages
+$3.6$ on Adult, $3.1$ on Diabetes, and $3.3$ on Covertype. The
+certificate captures $36$--$39\%$ of the LP bound---it is a useful
+sanity check but not a substitute for the LP.
+
+\subsection{UCI Adult: full comparison}
+
+\begin{table}[t]
+\caption{LP ratios and runtimes across 36 UCI Adult configurations
+(exact LP). Lower ratio is better; $1.000$ is optimal.}
+\label{tab:adult}
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+Algorithm & Mean & Std & Min & Max & Med.\ time (s) & Max time (s) \\
+\midrule
+LP oracle   & 1.000 & ---   & 1.000 & 1.000 & 4{,}586 & 338{,}755 \\
+\textbf{OC-Local}  & \textbf{1.147} & 0.047 & 1.088 & 1.265 & 0.36 & 57 \\
+OC-Forward  & 1.158 & 0.047 & 1.104 & 1.283 & 0.26 & 52 \\
+Charikar    & 1.173 & 0.056 & 1.104 & 1.306 & 3.60 & 564 \\
+Ding        & 1.235 & 0.032 & 1.179 & 1.331 & 2.22 & 431 \\
+RKC-Gonzalez & 1.280 & 0.049 & 1.197 & 1.370 & 0.002 & 0.02 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:adult} gives the headline numbers. OC-Local achieves
+the best mean ratio at $1.147$, ahead of Charikar ($1.173$), Ding
+($1.235$), and RKC-Gonzalez ($1.280$). It is also faster: median
+$0.36$\,s against Charikar's $3.60$\,s and Ding's $2.22$\,s.
+OC-Local wins $33/36$ per-configuration comparisons against Charikar
+at a median $7\times$ speedup, and $35/36$ against Ding at a median
+$8\times$ speedup. The LP row is shown only for reference---its median
+solve time is $4{,}586$ seconds.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{fig3_quality_speed.png}
+\caption{Quality--runtime tradeoff on UCI Adult. Each point is one
+$(N,k,z/N)$ configuration; lower-left is better. OC-Local (green
+diamonds) occupies the quality frontier at every runtime; no other
+practical algorithm matches its radius at comparable speed.}
+\label{fig:qualityspeed}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{fig1_ratio_vs_N.png}
+\caption{LP ratio versus $N$, averaged over $k$, one panel per outlier
+rate. OC-Local's ratio stays near $1.13$--$1.16$ throughout, while the
+gap to Gonzalez and Ding grows with $N$.}
+\label{fig:ratiovsN}
+\end{figure}
+
+Figure~\ref{fig:qualityspeed} shows the full quality--runtime picture:
+OC-Local consistently dominates the lower-left corner. The advantage
+is stable with dataset size (Figure~\ref{fig:ratiovsN}): OC-Local's
+ratio stays between $1.13$ and $1.16$ from $N=500$ to $N=20{,}000$.
+
+\begin{table}[t]
+\caption{Paired tests across 36 Adult configurations.
+Positive $\bar{d}$ means OC-Local is better.
+Wilcoxon gives the signed-rank test.}
+\label{tab:ttests}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Comparison & $\bar d$ & $t$ & $p$ & Wilcoxon $p$ \\
+\midrule
+OC-Local vs RKC-Gonzalez & $+0.134$ & $+13.3$ & $<10^{-14}$ & $2.9\times10^{-11}$ \\
+OC-Local vs Ding         & $+0.089$ & $+14.3$ & $<10^{-15}$ & $5.8\times10^{-11}$ \\
+OC-Local vs Charikar     & $+0.026$ & $+5.7$  & $<10^{-5}$  & $3.1\times10^{-8}$ \\
+OC-Local vs OC-Forward   & $+0.012$ & $+7.9$  & $<10^{-8}$  & $2.9\times10^{-11}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ttests} confirms none of the gaps are noise. Even the
+smallest comparison---OC-Local vs its own forward-greedy
+initialisation---is significant at $p<10^{-8}$: the $1$-swap phase
+improves the mean ratio by $0.012$ in $36$ of $36$ configurations at a
+median cost of $0.10$ seconds, so it should always be applied.
+SimplifiedDRG (the poolless baseline) reaches only $1.295$; the pool
+buys an $11.5\%$ improvement.
+
+The $36$ configurations share a base dataset, so the paired $t$-tests
+overstate independence. The Wilcoxon column (distribution-free) agrees
+with every conclusion. As a further robustness check, restricting to
+the $18$ smallest configurations ($N\le 2{,}000$, where the LP is
+solved quickly) leaves every conclusion intact: OC-Local wins $17$--$18$
+of $18$ against each baseline with Wilcoxon $p\le 1.3\times10^{-4}$.
+
+\paragraph{Runtime scaling.}
+Log-log regression gives OC-Local $\approx O(N^{1.85})$ ($R^2=0.976$)
+and Charikar $\approx O(N^{2.12})$ ($R^2=0.999$). Ding's nominal
+exponent is lower at $O(N^{1.10})$, but its trial count $(z{+}1)\ln100$
+dominates: at $N=20{,}000$, $k=50$, $z=20\%$ Ding needs $18{,}423$
+trials and takes $431$ seconds; OC-Local finishes in $57$ seconds.
+
+\subsection{Local search validation}
+\label{sec:localvalid}
+
+Theorem~\ref{thm:neg} says $1$-swap can be arbitrarily bad. How often
+does this actually happen? We ran OC-Local and exhaustive Phase~2
+on $400$ small random subsamples of Adult ($N\le 1{,}000$,
+$k\in\{5,10\}$, $z\le 10$)---the largest regime where exhaustive search
+is feasible.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{fig5_local_vs_exhaustive.png}
+\caption{Gap between $1$-swap local search and exhaustive pool search
+on $400$ instances. Local search is exact in $97.2\%$ of cases; the
+maximum gap is $4.82\%$. The 11 non-zero gaps are shown in the
+right panel.}
+\label{fig:localexhaustive}
+\end{figure}
+
+OC-Local matched the exhaustive solution in $389$ of $400$ instances
+($97.2\%$). The maximum observed gap was $4.82\%$, at pool size $20$
+($k=10$, $z=10$), where exhaustive search evaluates $184{,}756$ subsets
+in $10$ seconds and OC-Local finishes in $3$\,ms. The $11$ failures all
+had the adversarial structure from Theorem~\ref{thm:neg}---small
+clusters at near-uniform distances---which random real-data slices
+essentially never produce. No observed gap exceeded $1+2/k$, which
+supports the conjecture from Section~\ref{sec:theory}.
+
+\subsection{Pool size analysis: the $O=z$ threshold}
+\label{sec:oablation}
+
+Corollary~\ref{cor:phase} says the transition happens exactly at $O=z$.
+We test this by sweeping $O$ over $72$ configurations on Diabetes and
+Covertype and measuring the pool-optimal radius as a function of $O$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{fig_O_ablation.png}
+\caption{Radius (normalised to its value at $O=z$) versus overcount
+$O$ on a log axis, across all $72$ configurations. Radius drops
+steeply while $O<z$ and flattens near the threshold.}
+\label{fig:oablation}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.48\linewidth}
+  \includegraphics[width=\linewidth]{fig_phase_transition.png}
+  \caption{}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\linewidth}
+  \includegraphics[width=\linewidth]{fig_O_vs_zk.png}
+  \caption{}
+\end{subfigure}
+\caption{(a) Radius vs $O$ for three representative configurations
+with the $O=z$ threshold marked. (b) Empirical knee $O_{\rm knee}/z$
+vs $z/k$ across 72 configurations (Pearson $r=-0.60$).}
+\label{fig:phasepair}
+\end{figure}
+
+Figure~\ref{fig:oablation} shows the sweep: quality falls steeply left
+of $O=z$ in every configuration, exactly as the theory predicts. Past
+the threshold, quality keeps improving modestly. The empirical knee
+$O_{\rm knee}$ (the smallest $O$ within $2\%$ of best pool quality)
+sits between $1.0z$ and $1.7z$, with mean $1.55z$.
+
+It is worth being precise about what the theory covers and what it
+does not. Corollary~\ref{cor:phase} is about what the pool
+\emph{contains}---the $3\cdot\OPT$ guarantee switches on at $O=z$.
+The knee measures what OC-Local \emph{finds}, which keeps improving
+past $z$. These are different questions, and the gap between them is
+open.
+
+\paragraph{Adaptive stopping.}
+One can stop Gonzalez when $D_{k+t+1}\le\varepsilon D_{k+z+1}$,
+obtaining a pool with worst-case factor $(1+2\varepsilon)\cdot\OPT$
+(from the anytime bound). We ran this at
+$\varepsilon\in\{1.0,0.5,0.25,0.1\}$. As expected, $\varepsilon=1.0$
+stops exactly at $O=z$. Tighter $\varepsilon$ buys a better bound at
+the cost of a larger pool: mean stopping at $3.7z$ ($\varepsilon=0.5$),
+$6.0z$ ($0.25$), and $6.9z$ ($0.1$).
+
+\begin{table}[t]
+\caption{Pool-size settings across $72$ configurations. Gap is
+relative to the best quality over all tested $O$.}
+\label{tab:osettings}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Setting & Within 5\% & Mean gap & Max gap & Bound \\
+\midrule
+$O=z$        & 53/72 & $+3.7\%$ & $+11.8\%$ & $3\cdot\OPT$ \\
+$O=2z$       & 69/72 & $+1.3\%$ & $+8.2\%$  & $<3\cdot\OPT$ \\
+Adaptive ($\varepsilon=0.5$, $O\approx3.7z$) & \textbf{72/72} & ${<}1\%$ & ${<}3\%$ & $2\cdot\OPT$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:osettings} summarises the tradeoff. $O=z$ is the right
+default: 53/72 configurations land within $5\%$ of best. $O=2z$ raises
+that to 69/72 at $2\times$ the runtime; the adaptive rule at
+$\varepsilon=0.5$ reaches 72/72 with a tighter worst-case bound but
+roughly $3.7\times$ the pool.
+
+\paragraph{What predicts the knee.}
+Pearson correlations with $O_{\rm knee}/z$ ($n=72$): $z/k$ has
+$r=-0.60$ ($p<10^{-9}$), raw $z$ has $r=-0.61$, $N$ has $r=-0.59$,
+and dimensionality is uncorrelated ($r=+0.04$, $p=0.72$). Under a
+joint OLS fit ($R^2=0.43$), $z/k$ is the strongest standardised
+predictor ($-0.25$). When each center covers many outliers, the knee
+sits close to $z$; when outliers are few per center, slightly more
+pool helps.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{fig_synthetic.png}
+\caption{Controlled synthetic sweeps of $z/k$, cluster separation, and
+dimensionality. The knee stays near $z$ throughout; only $d\ge12$
+pushes it above $2.5z$.}
+\label{fig:synthetic}
+\end{figure}
+
+Synthetic experiments (Figure~\ref{fig:synthetic}) confirm this across
+two decades of $z/k$, a range of cluster separations, and dimensions
+$2$ to $20$.
+
+\subsection{Cross-dataset validation}
+\label{sec:multidata}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{fig_ratio_both.png}
+\caption{LP ratio versus $N$ on Diabetes (left) and Covertype (right).
+The algorithm ordering and magnitudes replicate the Adult results.}
+\label{fig:ratioboth}
+\end{figure}
+
+\begin{table}[t]
+\caption{LP ratios on secondary datasets. Values are against
+interpolated LP bounds. Charikar at achieved radius.}
+\label{tab:multidata}
+\centering
+\begin{tabular}{llcccc}
+\toprule
+Dataset & Algorithm & Mean & Std & Min & Max \\
+\midrule
+Diabetes ($d{=}8$, $n{=}36$)
+  & RKC-Gonzalez         & 1.923 & 0.256 & 1.449 & 2.414 \\
+  & Ding                 & 1.227 & 0.048 & 1.143 & 1.330 \\
+  & Charikar             & 1.201 & 0.044 & 1.145 & 1.313 \\
+  & OC-Local             & \textbf{1.155} & 0.043 & 1.093 & 1.275 \\
+Covertype ($d{=}10$, $n{=}30$)
+  & RKC-Gonzalez         & 1.671 & 0.173 & 1.418 & 1.960 \\
+  & Ding                 & 1.213 & 0.049 & 1.121 & 1.300 \\
+  & Charikar             & 1.227 & 0.060 & 1.134 & 1.374 \\
+  & OC-Local             & \textbf{1.171} & 0.051 & 1.095 & 1.294 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:multidata} shows the secondary results. OC-Local has
+the best mean LP ratio on both datasets: $1.155$ on Diabetes and
+$1.171$ on Covertype. Notably, the plain Gonzalez baseline degrades
+sharply on these datasets ($1.92$ and $1.67$), which widens OC-Local's
+margin relative to Adult. Figure~\ref{fig:ratioboth} shows the per-$N$
+curves mirror the Adult pattern. On HTRU2, raw radii tell the same
+story at $N=17{,}000$, $k=10$, $z=10\%$: OC-Local $1.79$ in $17$\,s
+against Gonzalez $4.21$ and Charikar's achieved radius above OC-Local's.
+
+\begin{table}[t]
+\caption{OC-Local speedup over Ding at full certificate trial count.
+OC-Local is faster in all 66 configurations.}
+\label{tab:speedup}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Dataset & Mean & Median & Min & Max \\
+\midrule
+Diabetes  ($n{=}36$) & $2.0\times$ & $2.0\times$ & $1.3\times$ & $2.4\times$ \\
+Covertype ($n{=}30$) & $2.6\times$ & $2.6\times$ & $2.1\times$ & $3.6\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+OC-Local is faster than Ding in every one of the $66$ configurations,
+by $2$--$3\times$ on average (Table~\ref{tab:speedup}). This is smaller
+than the $7$--$8\times$ advantage on Adult because each Ding trial is
+cheap and the trial count here is moderate. The more important
+differences at scale are quality and determinism; speed is a consistent
+but secondary advantage on these datasets.
+
+\subsection{Scalability}
+\label{sec:scalability}
+
+\begin{table}[t]
+\caption{OC-Local at large $N$ (Diabetes, $k=20$, $z=10\%$).
+Entries marked $\sim$ are projected from the fitted scaling law.}
+\label{tab:scale}
+\centering
+\begin{tabular}{rccc}
+\toprule
+$N$ & OC-Local radius & OC-Local time & Ding time \\
+\midrule
+20{,}000 & 2.060 & 57s & 133s \\
+50{,}000 & $\sim$2.11 & $\sim$310s & $\sim$900s \\
+99{,}000 & $\sim$2.15 & $\sim$1{,}100s & $\sim$3{,}800s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:scale} extends to the full Diabetes dataset. At
+$N=99{,}000$, OC-Local is projected to finish in about $18$ minutes;
+Ding's randomised certificate needs over an hour; Charikar's
+$O(N^{2.12})$ scaling implies several hours; and the LP is out of
+reach entirely. OC-Local is the only algorithm here that is both
+deterministic and carries a formal statement about what it has
+searched.
+
+%% ===================================================================
+\section{Conclusion}
+%% ===================================================================
+
+OverclusterDRG is a practical middle ground for Robust $k$-Center: fast
+like the Gonzalez heuristic, quality like Charikar, and deterministic
+throughout. The central contribution is the exact phase transition at
+$O=z$: the pool contains a $3\cdot\OPT$ solution when the overcount
+equals the outlier budget, and contains no finite guarantee below it.
+The $1$-swap variant achieves mean LP ratios of $1.147$--$1.171$ across
+three datasets, beats Charikar in $33/36$ and Ding in $35/36$
+configurations, and remains the best practical option at $N\approx
+10^{5}$ where the LP is unavailable.
+
+Three problems remain open. First, when does $1$-swap always find the
+good pool subset? We conjecture it does under generic distances and
+large-enough clusters, but the proof requires a new argument for
+max-type objectives---the standard $k$-median telescoping does not
+apply. Second, is the $3\cdot\OPT$ pool bound tight? Our best
+constructions give lower bounds near $2\cdot\OPT$. Third, does the
+phase-transition analysis extend to $k$-median with outliers, where
+the sum-type objective changes the geometry entirely?
+
+\appendix
+\section{The LP lower bound in full}
+\label{app:lp}
+
+For a candidate radius $r$, the feasibility LP has variables
+$y_i\in[0,1]$ (fractional center mass at point $i$),
+$s_j\in[0,1]$ (fractional outlier mass at $j$), and
+$x_{ij}\ge 0$ defined only for pairs with $d(x_i,x_j)\le r$:
+\[
+\begin{aligned}
+  \textstyle\sum_{i:\,d(x_i,x_j)\le r} x_{ij} + s_j &\ge 1
+    &&\forall j\\
+  x_{ij} &\le y_i &&\forall i,j\\
+  \textstyle\sum_i y_i &\le k\\
+  \textstyle\sum_j s_j &\le z
+\end{aligned}
+\]
+The optimal integral solution at radius $\OPT$ is feasible for
+$r=\OPT$, so $R_{\mathrm{LP}}\le\OPT$. We binary-search the $O(N^2)$
+pairwise distances. Solver: Gurobi~12.0.3, primal/dual feasibility
+tolerance $10^{-6}$. Adult LP times range from $100$--$1{,}096$\,s at
+$N=2{,}000$ to $3.4\times10^{5}$\,s at $N=20{,}000$. On Diabetes and
+Covertype the LP is interpolated from the solvable range; this is
+disclosed in Section~\ref{sec:expsetup} and in Table~\ref{tab:multidata}.
+
+\bibliographystyle{siam}
+\bibliography{refs}
+
+\end{document}

@@ -1,0 +1,45 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.pdf
+*.dvi
+*.ps
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Large datasets (download separately)
+*.arff
+adult.data
+adult.test
+covtype.data.gz
+diabetes_binary*.csv
+HTRU_2.csv
+
+# Gurobi license
+gurobi.log
+*.lic
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+*.swp
+*.swo
