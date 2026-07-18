@@ -1,306 +1,98 @@
-# ============================================================
-# DRG ALGORITHMS BENCHMARK
-# SimplifiedDRG + OverclusterDRG (Forward Greedy Phase 2)
-# Matches Charikar script interface for direct comparison
-# ============================================================
-
 import numpy as np
-import ast
-import os
-import time
 from scipy.spatial.distance import cdist
 
-# ============================================================
-# CONFIG  (mirror Charikar script exactly)
-# ============================================================
 
-DATASET_FILE  = "adult_final_dataset.py"
-OUTPUT_FILE   = "drg_results.csv"
+def robust_radius(X, centers, z):
+    """(z+1)-th largest distance from any point to its nearest center."""
+    dists = cdist(X, X[centers]).min(axis=1)
+    return float(np.partition(dists, -(z + 1))[-(z + 1)])
 
-DATASET_SIZES    = [2000]
-K_VALUES         = [50, 10, 20]
-OUTLIER_PERCENTS = [0.1, 0.2]
 
-BATCH_SIZE = 1024   # for large-n distance batching
-
-# ============================================================
-# DATA LOADING
-# ============================================================
-
-def load_data():
-    try:
-        with open(DATASET_FILE, "r") as f:
-            data = ast.literal_eval(f.read())
-        X = np.asarray(data, dtype=np.float32)
-        print(f"Loaded dataset: N={X.shape[0]}, d={X.shape[1]}")
-        return X
-    except FileNotFoundError:
-        print("[!] Dataset not found — generating synthetic data (N=30000, d=10)")
-        return np.random.rand(30000, 10).astype(np.float32)
-
-# ============================================================
-# SHARED UTILITIES
-# ============================================================
-
-def robust_radius(X, centers_idx, O):
-    """r_O(C, X): (O+1)-th largest distance from any point to nearest center."""
-    C = X[centers_idx]
-    # batched to avoid O(n*k) memory spike for large n
-    n = len(X)
-    min_d = np.full(n, np.inf, dtype=np.float32)
-    for i in range(0, len(centers_idx), BATCH_SIZE):
-        batch = X[centers_idx[i:i+BATCH_SIZE]]
-        d = cdist(X, batch, metric="euclidean").min(axis=1).astype(np.float32)
-        np.minimum(min_d, d, out=min_d)
-    sorted_d = np.sort(min_d)[::-1]
-    return float(sorted_d[O]) if O < n else 0.0
-
-def gonzalez(X, k, c1=None):
-    """Standard Gonzalez greedy k-center. Returns list of k center indices."""
-    n = len(X)
-    if c1 is None:
-        # medoid-approximation: point nearest to dataset mean
-        mean = X.mean(axis=0, keepdims=True)
-        c1 = int(cdist(X, mean, metric="euclidean").argmin())
-    centers = [c1]
-    min_d = cdist(X, X[[c1]], metric="euclidean").ravel()
-    for _ in range(k - 1):
+def gonzalez_pool(X, m):
+    """Gonzalez farthest-point for m steps, starting from the point nearest the empirical centroid."""
+    c0 = int(np.linalg.norm(X - X.mean(axis=0), axis=1).argmin())
+    centers = [c0]
+    min_d = np.linalg.norm(X - X[c0], axis=1).astype(np.float32)
+    for _ in range(m - 1):
         nxt = int(min_d.argmax())
         centers.append(nxt)
-        d_new = cdist(X, X[[nxt]], metric="euclidean").ravel()
-        np.minimum(min_d, d_new, out=min_d)
+        np.minimum(min_d, np.linalg.norm(X - X[nxt], axis=1).astype(np.float32), out=min_d)
     return centers
 
-def voronoi_sizes(X, centers_idx):
-    """Return Voronoi cell sizes for each center."""
-    C = X[centers_idx]
-    assignments = cdist(X, C, metric="euclidean").argmin(axis=1)
-    return np.bincount(assignments, minlength=len(centers_idx))
 
-# ============================================================
-# ALGORITHM 1 — SimplifiedDRG
-# Deterministic O(nk), 2-approx under SOI
-# ============================================================
+def _rz(d, z):
+    """(z+1)-th largest value in array d via O(n) partition."""
+    return float(np.partition(d, -(z + 1))[-(z + 1)])
 
-def simplified_drg(X, k, O):
+
+def forward_greedy(D, k, z):
     """
-    At each step select the (O+1)-th farthest point from current centers.
-    No density filtering — selection loop is identical to Gonzalez except
-    for the rank offset.
+    Greedy selection of k pool indices from precomputed n x pool_size distance matrix D.
+    Starts from pool index 0. Returns pool-local indices.
     """
-    n = len(X)
-    mean = X.mean(axis=0, keepdims=True)
-    c1   = int(cdist(X, mean, metric="euclidean").argmin())
-    centers = [c1]
-    min_d = cdist(X, X[[c1]], metric="euclidean").ravel()
-
-    for _ in range(k - 1):
-        # rank all points descending; pick rank O+1 (0-indexed: index O)
-        ranked = np.argsort(min_d)[::-1]
-        nxt    = int(ranked[O])
-        centers.append(nxt)
-        d_new  = cdist(X, X[[nxt]], metric="euclidean").ravel()
-        np.minimum(min_d, d_new, out=min_d)
-
-    return centers
-
-# ============================================================
-# ALGORITHM 2 — OverclusterDRG (Forward Greedy Phase 2)
-# O(nk(k+O)), unconditional ~3·OPT
-# ============================================================
-
-def overcluster_drg(X, k, O):
-    """
-    Phase 1: Gonzalez for k+O steps → candidate pool Q.
-    Phase 2: Forward greedy selection of k centers from Q,
-             at each step picking the candidate minimising r_O.
-
-    Note: Claim 4 proof gap exists (see paper audit). Algorithm
-    is empirically correct; proof holds for exhaustive Phase 2
-    (see overcluster_drg_exact for the provably correct variant).
-    """
-    # ── Phase 1 ──────────────────────────────────────────────
-    Q = gonzalez(X, k + O)          # k+O candidates
-    X_Q = X[Q]                      # shape (k+O, d)
-
-    # ── Phase 2: densest-first initialisation ────────────────
-    vsizes = voronoi_sizes(X, Q)
-    s0_pos = int(vsizes.argmax())   # index within Q
-    selected    = [Q[s0_pos]]       # global indices
-    remaining_Q = [i for i in range(len(Q)) if i != s0_pos]  # Q-local indices
-
-    min_d = cdist(X, X[selected], metric="euclidean").ravel()
-
-    # ── Phase 2: forward greedy ──────────────────────────────
+    sel = [0]
+    min_d = D[:, 0].copy()
+    rem = list(range(1, D.shape[1]))
     for _ in range(k - 1):
         best_r, best_qi = np.inf, None
-
-        for qi in remaining_Q:
-            q_global = Q[qi]
-            trial_d  = np.minimum(min_d,
-                                  cdist(X, X[[q_global]],
-                                        metric="euclidean").ravel())
-            r = float(np.sort(trial_d)[::-1][O])
+        for qi in rem:
+            r = _rz(np.minimum(min_d, D[:, qi]), z)
             if r < best_r:
-                best_r  = r
-                best_qi = qi
+                best_r, best_qi = r, qi
+        sel.append(best_qi)
+        np.minimum(min_d, D[:, best_qi], out=min_d)
+        rem.remove(best_qi)
+    return sel
 
-        best_global = Q[best_qi]
-        selected.append(best_global)
-        remaining_Q.remove(best_qi)
-        d_new = cdist(X, X[[best_global]], metric="euclidean").ravel()
-        np.minimum(min_d, d_new, out=min_d)
 
-    return selected, Q
-
-# ============================================================
-# ALGORITHM 3 — OverclusterDRG Exact (exhaustive Phase 2)
-# Provably 3·OPT for fixed O; O(nk^O) complexity
-# ============================================================
-
-def overcluster_drg_exact(X, k, O):
+def local_search(D, sel, k, z, eps=1e-10):
     """
-    Phase 1: Gonzalez for k+O steps.
-    Phase 2: Exhaustive best k-subset of Q.
-    Provably correct: Claims 1-3 directly give r_O ≤ 3·OPT.
-    Practical for small O (O=1: O(nk), O=2: O(nk²)).
+    1-swap first-improvement local search over the pool.
+    Iterates over all (i, qi) pairs; accepts the first swap that lowers r_z by more
+    than eps and restarts. Terminates when no improving swap exists.
+    Returns (pool-local indices, best_r).
     """
-    from itertools import combinations
+    sel = list(sel)
+    best_r = _rz(D[:, sel].min(axis=1), z)
+    pool_sz = D.shape[1]
 
-    Q = gonzalez(X, k + O)
+    while True:
+        improved = False
+        for i in range(k):
+            others = [sel[j] for j in range(k) if j != i]
+            base_d = D[:, others].min(axis=1) if others else np.full(D.shape[0], np.inf)
+            sel_set = set(sel)
+            for qi in range(pool_sz):
+                if qi in sel_set:
+                    continue
+                r = _rz(np.minimum(base_d, D[:, qi]), z)
+                if r < best_r - eps:
+                    sel[i] = qi
+                    best_r = r
+                    improved = True
+                    break
+            if improved:
+                break
+        if not improved:
+            break
 
-    best_r, best_C = np.inf, None
-    for subset in combinations(range(len(Q)), k):
-        cidx = [Q[i] for i in subset]
-        r    = robust_radius(X, cidx, O)
-        if r < best_r:
-            best_r  = r
-            best_C  = cidx
+    return sel, best_r
 
-    return best_C, Q
 
-# ============================================================
-# SOI DIAGNOSTIC
-# ============================================================
+def oc_greedy(X, k, z):
+    """OC-Greedy: gonzalez_pool(k+z) then forward_greedy. Returns (global center indices, radius)."""
+    pool = gonzalez_pool(X, k + z)
+    D = cdist(X, X[pool])
+    sel = forward_greedy(D, k, z)
+    centers = [pool[i] for i in sel]
+    return centers, robust_radius(X, centers, z)
 
-def soi_ratio(X, centers_idx, O):
-    """
-    Estimate SOI ratio = gap(Z_hat, X\\Z_hat) / diam(X\\Z_hat).
-    Uses the output outlier set as proxy for Z*.
-    SOI holds when ratio > 1.
-    """
-    min_d = cdist(X, X[centers_idx], metric="euclidean").min(axis=1)
-    out_idx = np.argsort(min_d)[::-1][:O].tolist()
-    inl_idx = [i for i in range(len(X)) if i not in set(out_idx)]
-    if not out_idx or not inl_idx:
-        return float("inf")
-    gap  = cdist(X[out_idx], X[inl_idx], metric="euclidean").min()
-    diam = cdist(X[inl_idx], X[inl_idx], metric="euclidean").max()
-    return float(gap / diam) if diam > 1e-12 else float("inf")
 
-# ============================================================
-# EXPERIMENT DRIVER
-# ============================================================
-
-def run_experiment(X, k, O, use_exact=False):
-    """Run both DRG variants and return timing + radius."""
-    results = {}
-
-    # ── SimplifiedDRG ─────────────────────────────────────
-    t0 = time.time()
-    C_sdrg = simplified_drg(X, k, O)
-    t1 = time.time()
-    r_sdrg = robust_radius(X, C_sdrg, O)
-    soi    = soi_ratio(X, C_sdrg, O)
-    results["SimplifiedDRG"] = {
-        "radius": r_sdrg,
-        "time":   t1 - t0,
-        "soi":    soi,
-        "centers": C_sdrg,
-    }
-
-    # ── OverclusterDRG (forward greedy) ───────────────────
-    t0 = time.time()
-    C_ocdrg, Q_ocdrg = overcluster_drg(X, k, O)
-    t1 = time.time()
-    r_ocdrg = robust_radius(X, C_ocdrg, O)
-    results["OverclusterDRG"] = {
-        "radius":  r_ocdrg,
-        "time":    t1 - t0,
-        "centers": C_ocdrg,
-        "pool_size": len(Q_ocdrg),
-    }
-
-    # ── OverclusterDRG Exact (exhaustive, only for small k+O) ─
-    if use_exact and k + O <= 25:
-        t0 = time.time()
-        C_exact, _ = overcluster_drg_exact(X, k, O)
-        t1 = time.time()
-        r_exact = robust_radius(X, C_exact, O)
-        results["OverclusterDRG_Exact"] = {
-            "radius": r_exact,
-            "time":   t1 - t0,
-            "centers": C_exact,
-        }
-
-    return results
-
-def main():
-    X_full = load_data()
-    N_full = X_full.shape[0]
-
-    # CSV header
-    if not os.path.exists(OUTPUT_FILE):
-        with open(OUTPUT_FILE, "w") as f:
-            f.write("N,k,outlier_percent,z,algorithm,radius,time,soi_ratio\n")
-
-    print("\nDRG ALGORITHMS BENCHMARK")
-    print("=" * 70)
-    print(f"{'N':>6} {'k':>4} {'O%':>5} {'z':>5} │ "
-          f"{'Algorithm':<22} {'Radius':>10} {'Time(s)':>9} {'SOI':>7}")
-    print("─" * 70)
-
-    for N in DATASET_SIZES:
-        if N > N_full:
-            print(f"[!] N={N} exceeds dataset size {N_full}, skipping")
-            continue
-
-        X = X_full[:N]
-
-        for k in K_VALUES:
-            for p in OUTLIER_PERCENTS:
-                O = int(p * N)
-
-                # use exhaustive only when k+O is small enough to be fast
-                use_exact = (k + O) <= 20
-
-                res = run_experiment(X, k, O, use_exact=use_exact)
-
-                for alg, info in res.items():
-                    soi_val = info.get("soi", float("nan"))
-                    soi_str = f"{soi_val:.3f}" if not np.isinf(soi_val) else "inf"
-
-                    print(f"{N:>6} {k:>4} {int(p*100):>4}% {O:>5} │ "
-                          f"{alg:<22} {info['radius']:>10.4f} "
-                          f"{info['time']:>9.4f} {soi_str:>7}")
-
-                    with open(OUTPUT_FILE, "a") as f:
-                        f.write(
-                            f"{N},{k},{p},{O},{alg},"
-                            f"{info['radius']:.6f},"
-                            f"{info['time']:.6f},"
-                            f"{soi_val:.4f}\n"
-                        )
-
-                print("─" * 70)
-
-    print(f"\nDone. Results saved to: {OUTPUT_FILE}")
-    print("\nTo compare with Charikar:")
-    print("  join drg_results.csv + charikar_results1.csv on (N, k, z)")
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-    main()
+def oc_local(X, k, z):
+    """OC-Local: pool + forward_greedy + local_search. Returns (global center indices, radius)."""
+    pool = gonzalez_pool(X, k + z)
+    D = cdist(X, X[pool])
+    sel = forward_greedy(D, k, z)
+    sel, r = local_search(D, sel, k, z)
+    centers = [pool[i] for i in sel]
+    return centers, r

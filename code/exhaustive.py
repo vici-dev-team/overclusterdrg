@@ -1,245 +1,115 @@
-# ============================================================
-# OVERCLUSTER PHASE 2: EXHAUSTIVE vs GREEDY + LOCAL SEARCH
-# ============================================================
-
-import numpy as np
-import pandas as pd
+import os
+import sys
 import ast
+import csv
+import math
 import time
 import itertools
+import numpy as np
 from scipy.spatial.distance import cdist
 
-# ============================================================
-# CONFIG
-# ============================================================
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DATASET_FILE = "adult_final_dataset.py"
-OUTPUT_FILE  = "exhaustive_vs_local.csv"
+REPO     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATASETS = os.path.join(REPO, 'datasets')
+RESULTS  = os.path.join(REPO, 'results')
 
-DATASET_SIZES    = [50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400, 1450, 1500]
-K_VALUES         = [10, 20, 50]
-OUTLIER_PERCENTS = [0.1, 0.2]
+from drg import gonzalez_pool, forward_greedy, local_search
 
-MAX_O_EXACT = 20   # only run exhaustive if O <= this
+SIZES    = list(range(50, 1050, 50))   # 50, 100, ..., 1000
+K_VALUES = [10, 20, 50]
+Z_FRACS  = [0.10, 0.20]
 
-# ============================================================
-# DATA
-# ============================================================
+# Skip exhaustive when C(pool_size, k) exceeds this threshold
+COMBO_LIMIT = 500_000
 
-def load_data():
-    try:
-        with open(DATASET_FILE, "r") as f:
-            data = ast.literal_eval(f.read())
-        return np.asarray(data, dtype=np.float32)
-    except:
-        print("[!] Using synthetic data")
-        return np.random.rand(5000, 10).astype(np.float32)
 
-# ============================================================
-# UTILITIES
-# ============================================================
-
-def robust_radius_fast(min_d, O):
-    return float(np.partition(min_d, -O-1)[-O-1])
-
-def compute_min_d(X, centers):
-    return cdist(X, X[centers]).min(axis=1)
-
-# ============================================================
-# GONZALEZ (Phase 1)
-# ============================================================
-
-def gonzalez(X, k):
-    mean = X.mean(axis=0, keepdims=True)
-    c1 = int(cdist(X, mean).argmin())
-
-    centers = [c1]
-    min_d = cdist(X, X[[c1]]).ravel()
-
-    for _ in range(k - 1):
-        nxt = int(min_d.argmax())
-        centers.append(nxt)
-        d_new = cdist(X, X[[nxt]]).ravel()
-        np.minimum(min_d, d_new, out=min_d)
-
-    return centers
-
-# ============================================================
-# FORWARD GREEDY
-# ============================================================
-
-def forward_greedy_fast(X, Q, k, O):
-    D_Q = cdist(X, X[Q])
-
-    selected = [0]
-    min_d = D_Q[:, 0].copy()
-    remaining = list(range(1, len(Q)))
-
-    for _ in range(k - 1):
-        best_r = np.inf
-        best_qi = None
-
-        for qi in remaining:
-            trial = np.minimum(min_d, D_Q[:, qi])
-            r = robust_radius_fast(trial, O)
-
-            if r < best_r:
-                best_r = r
-                best_qi = qi
-
-        selected.append(best_qi)
-        np.minimum(min_d, D_Q[:, best_qi], out=min_d)
-        remaining.remove(best_qi)
-
-    return [Q[i] for i in selected]
-
-# ============================================================
-# LOCAL SEARCH (1-SWAP)
-# ============================================================
-
-def local_search_fast(X, Q, k, O, iters=5):
-    D_Q = cdist(X, X[Q])
-
-    selected = forward_greedy_fast(X, Q, k, O)
-    selected_q = [Q.index(c) for c in selected]
-
-    min_d = D_Q[:, selected_q].min(axis=1)
-    best_r = robust_radius_fast(min_d, O)
-
-    for _ in range(iters):
-        improved = False
-
-        for i in range(k):
-            other = [q for j,q in enumerate(selected_q) if j != i]
-            base_d = D_Q[:, other].min(axis=1)
-
-            for qi in range(len(Q)):
-                if qi in selected_q:
-                    continue
-
-                trial = np.minimum(base_d, D_Q[:, qi])
-                r = robust_radius_fast(trial, O)
-
-                if r < best_r:
-                    selected_q[i] = qi
-                    min_d = trial
-                    best_r = r
-                    improved = True
-                    break
-
-            if improved:
-                break
-
-        if not improved:
-            break
-
-    return [Q[i] for i in selected_q]
-
-# ============================================================
-# EXHAUSTIVE PHASE 2
-# ============================================================
-
-def exhaustive_phase2(X, Q, k, O):
+def exhaustive_phase2(X, pool, k, z):
+    """
+    Exhaustive optimal selection of k centers from pool.
+    Tests all C(len(pool), k) subsets and returns (centers, radius).
+    """
+    pool_arr = np.array(pool)
     best_r = np.inf
-    best_C = None
-
-    for subset in itertools.combinations(range(len(Q)), k):
-        C = [Q[i] for i in subset]
-        min_d = compute_min_d(X, C)
-        r = robust_radius_fast(min_d, O)
-
+    best_centers = None
+    for subset in itertools.combinations(range(len(pool)), k):
+        cidx = pool_arr[list(subset)]
+        dists = cdist(X, X[cidx]).min(axis=1)
+        r = float(np.partition(dists, -(z + 1))[-(z + 1)])
         if r < best_r:
             best_r = r
-            best_C = C
+            best_centers = list(cidx)
+    return best_centers, best_r
 
-    return best_C, best_r
 
-# ============================================================
-# EXPERIMENT
-# ============================================================
+def _ncr(n, r):
+    """C(n, r), returns early if result exceeds COMBO_LIMIT."""
+    if r > n:
+        return 0
+    r = min(r, n - r)
+    result = 1
+    for i in range(r):
+        result = result * (n - i) // (i + 1)
+        if result > COMBO_LIMIT:
+            return result
+    return result
 
-def run_experiment(X, k, O):
-    Q = gonzalez(X, k + O)
 
-    results = {}
+if __name__ == '__main__':
+    path = os.path.join(DATASETS, 'adult_final_dataset.py')
+    X_full = np.array(ast.literal_eval(open(path).read()), dtype=np.float32)
+    print(f"Loaded adult: {X_full.shape}")
 
-    # ---------- Local Search ----------
-    t0 = time.time()
-    C_loc = local_search_fast(X, Q, k, O)
-    t1 = time.time()
+    os.makedirs(RESULTS, exist_ok=True)
+    out_csv = os.path.join(RESULTS, 'exhaustive_vs_local.csv')
 
-    r_loc = robust_radius_fast(compute_min_d(X, C_loc), O)
+    fieldnames = ['N', 'k', 'outlier_pct', 'z',
+                  'local_radius', 'local_time', 'opt_radius', 'opt_time', 'gap']
 
-    results["LocalSearch"] = (r_loc, t1 - t0)
+    with open(out_csv, 'w', newline='') as f:
+        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
 
-    # ---------- Exhaustive ----------
-    if O <= MAX_O_EXACT:
-        t0 = time.time()
-        C_opt, r_opt = exhaustive_phase2(X, Q, k, O)
-        t1 = time.time()
+    sizes = [n for n in SIZES if n <= len(X_full)]
+    total = len(sizes) * len(K_VALUES) * len(Z_FRACS)
+    done = 0
 
-        results["Exhaustive"] = (r_opt, t1 - t0)
-
-        gap = r_loc / r_opt if r_opt > 0 else 1.0
-        results["Gap"] = gap
-    else:
-        results["Exhaustive"] = (np.nan, np.nan)
-        results["Gap"] = np.nan
-
-    return results
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-    X_full = load_data()
-    rows = []
-
-    print("\nEXHAUSTIVE vs LOCAL SEARCH\n")
-    print("=" * 80)
-
-    for N in DATASET_SIZES:
+    for N in sizes:
         X = X_full[:N]
-
         for k in K_VALUES:
-            for p in OUTLIER_PERCENTS:
-                O = int(p * N)
+            for op in Z_FRACS:
+                done += 1
+                z = int(op * N)
 
-                print(f"N={N}, k={k}, O={O}")
+                # Shared pool for a fair comparison between local and exhaustive
+                pool = gonzalez_pool(X, k + z)
+                D = cdist(X, X[pool])
 
-                res = run_experiment(X, k, O)
+                t0 = time.perf_counter()
+                sel = forward_greedy(D, k, z)
+                sel, local_r = local_search(D, sel, k, z)
+                local_t = time.perf_counter() - t0
 
-                r_loc, t_loc = res["LocalSearch"]
-                r_opt, t_opt = res["Exhaustive"]
-                gap = res["Gap"]
-
-                print(f"  Local:      r={r_loc:.4f}  t={t_loc:.4f}")
-                if not np.isnan(r_opt):
-                    print(f"  Exhaustive: r={r_opt:.4f}  t={t_opt:.4f}")
-                    print(f"  Gap:        {gap:.4f}")
+                combos = _ncr(len(pool), k)
+                if combos <= COMBO_LIMIT:
+                    t0 = time.perf_counter()
+                    _, opt_r = exhaustive_phase2(X, pool, k, z)
+                    opt_t = time.perf_counter() - t0
+                    gap = local_r / opt_r if opt_r > 0 else 1.0
+                    status = f"gap={gap:.4f}"
                 else:
-                    print("  Exhaustive: skipped")
+                    opt_r = opt_t = float('nan')
+                    gap = float('nan')
+                    status = f"exhaustive skipped (C={combos:,})"
 
-                rows.append({
-                    "N": N,
-                    "k": k,
-                    "z": O,
-                    "local_radius": r_loc,
-                    "local_time": t_loc,
-                    "opt_radius": r_opt,
-                    "opt_time": t_opt,
-                    "gap": gap
-                })
+                print(f"[{done}/{total}] N={N} k={k} z={z}: local={local_r:.4f} {status}")
 
-                print("-" * 60)
-
-    df = pd.DataFrame(rows)
-    df.to_csv(OUTPUT_FILE, index=False)
-
-    print(f"\n✅ Saved results to {OUTPUT_FILE}")
-
-# ============================================================
-
-if __name__ == "__main__":
-    main()
+                row = {
+                    'N': N, 'k': k, 'outlier_pct': op, 'z': z,
+                    'local_radius': round(local_r, 8),
+                    'local_time':   round(local_t, 4),
+                    'opt_radius':   '' if math.isnan(opt_r) else round(opt_r, 8),
+                    'opt_time':     '' if math.isnan(opt_t) else round(opt_t, 4),
+                    'gap':          '' if math.isnan(gap) else round(gap, 6),
+                }
+                with open(out_csv, 'a', newline='') as f:
+                    csv.DictWriter(f, fieldnames=fieldnames).writerow(row)
