@@ -1,4 +1,0 @@
-dataset,n,cert_ratio_mean,cert_ratio_std,cert_ratio_min,cert_ratio_max,lp_ratio_mean,cert_tightness_mean,cert_tightness_min,cert_tightness_max
-adult,36,3.6297,1.241,2.0949,7.0101,1.1583,0.357,0.1618,0.6081
-diabetes,36,3.1298,0.7172,2.0276,4.6526,1.1545,0.3915,0.2419,0.6178
-covertype,30,3.2459,0.8106,2.1072,4.9565,1.1713,0.3865,0.2239,0.6139

@@ -1,7 +1,0 @@
-predictor,pearson_r,p_value,ols_coeff_std
-z,-0.6057,1.732e-08,-0.129
-z_over_k,-0.6025,2.144e-08,-0.252
-N,-0.588,5.606e-08,-0.189
-sparsity_ratio,-0.4271,1.832e-04,0.046
-d,0.043,7.200e-01,0.053
-intercept,,,1.652
