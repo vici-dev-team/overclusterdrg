@@ -1,0 +1,16 @@
+subset,comparison,wins,n,wilcoxon_p
+all_36,OC-Local vs Charikar r*,33,36,1.5555997379124165e-08
+all_36,OC-Local vs Gonzalez,36,36,1.4551915228366852e-11
+all_36,OC-Local vs SimplifiedDRG,35,36,2.9103830456733704e-11
+all_36,OC-Local vs OC-Forward,36,36,1.4551915228366852e-11
+all_36,OC-Local vs Ding,35,36,2.9103830456733704e-11
+N<=1000,OC-Local vs Charikar r*,11,12,0.00244140625
+N<=1000,OC-Local vs Gonzalez,12,12,0.000244140625
+N<=1000,OC-Local vs SimplifiedDRG,11,12,0.00048828125
+N<=1000,OC-Local vs OC-Forward,12,12,0.000244140625
+N<=1000,OC-Local vs Ding,11,12,0.00048828125
+N<=2000,OC-Local vs Charikar r*,17,18,0.000125885009765625
+N<=2000,OC-Local vs Gonzalez,18,18,3.814697265625e-06
+N<=2000,OC-Local vs SimplifiedDRG,17,18,7.62939453125e-06
+N<=2000,OC-Local vs OC-Forward,18,18,3.814697265625e-06
+N<=2000,OC-Local vs Ding,17,18,7.62939453125e-06

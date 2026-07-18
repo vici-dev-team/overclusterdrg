@@ -1,0 +1,5 @@
+dataset,N,k,z,knee_O,flat_rho_O
+adult,5000,10,500,300,1500.0
+adult,5000,10,1000,500,1500.0
+covertype,1000,20,100,200,1.0
+covertype,1000,20,200,300,1.0

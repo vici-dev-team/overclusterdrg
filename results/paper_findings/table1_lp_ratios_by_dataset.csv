@@ -1,0 +1,4 @@
+dataset,n,OC_Local_mean,OC_Local_std,OC_Local_min,OC_Local_max,Gonzalez_mean,SimplifiedDRG_mean,Charikar3_mean
+Adult (exact LP),36,1.1583,0.0471,1.1036,1.2831,1.2801,1.2951,3.5174
+Diabetes (interp LP),36,1.1545,0.0428,1.0929,1.2751,1.9234,,1.2007
+Covertype (interp LP),30,1.1713,0.0511,1.0949,1.2936,1.6709,,1.2274

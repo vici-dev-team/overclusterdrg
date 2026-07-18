@@ -1,0 +1,10 @@
+subset,comparison,wins,n,wilcoxon_p
+all_36,OC-Local vs Charikar(x3),36,36,0.0
+all_36,OC-Local vs Gonzalez,36,36,0.0
+all_36,OC-Local vs SimplifiedDRG,35,36,0.0
+N<=1000,OC-Local vs Charikar(x3),12,12,0.000244
+N<=1000,OC-Local vs Gonzalez,12,12,0.000244
+N<=1000,OC-Local vs SimplifiedDRG,11,12,0.000732
+N<=2000,OC-Local vs Charikar(x3),18,18,4e-06
+N<=2000,OC-Local vs Gonzalez,18,18,4e-06
+N<=2000,OC-Local vs SimplifiedDRG,17,18,1.1e-05
