@@ -92,15 +92,15 @@ plt.close()
 print("fig1_ratio_vs_N.png")
 
 # ── FIGURE 3.3: LP ratio vs N — Diabetes + Covertype — 2 panels vertical ────
-# Only LP, Ding, OC-Local, Gonzalez shown (Charikar too slow at these scales)
-diab = pd.read_csv(os.path.join(RESULTS, 'multidata_diabetes_fixed.csv'))
-cov  = pd.read_csv(os.path.join(RESULTS, 'multidata_covertype_fixed.csv'))
+# Uses exact Gurobi LP (N=100–800). Only LP, Ding, OC-Local, Gonzalez shown.
+exact = pd.read_csv(os.path.join(RESULTS, 'lp_exact_small_n.csv'))
 
 fig, axes = plt.subplots(2, 1, figsize=(7, 9), sharey=False)
-for ax, df_sec, title in [
-    (axes[0], diab, 'Diabetes Indicators  (d=8)'),
-    (axes[1], cov,  'UCI Covertype  (d=10)'),
+for ax, ds_name, title in [
+    (axes[0], 'diabetes',  'Diabetes Indicators  (d=8)'),
+    (axes[1], 'covertype', 'UCI Covertype  (d=10)'),
 ]:
+    df_sec = exact[exact['dataset'] == ds_name].copy()
     df_sec['OC_LP']   = df_sec['OC_Local_radius']  / df_sec['LP_Radius']
     df_sec['Ding_LP'] = df_sec['DingRKC_radius']   / df_sec['LP_Radius']
     df_sec['Gonz_LP'] = df_sec['gonzalez_radius']  / df_sec['LP_Radius']
